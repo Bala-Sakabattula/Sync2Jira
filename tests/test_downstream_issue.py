@@ -1762,6 +1762,7 @@ class TestDownstreamIssue(unittest.TestCase):
         out = d._truncate_jira_text(body, issue_url)
         self.assertLessEqual(len(out), d.JIRA_TEXT_BODY_MAX_CHARS)
         self.assertIn("Truncated", out)
+        self.assertIn("....", out)
         link = f"[See More|{issue_url}]"
         self.assertIn(link, out)
         self.assertEqual(out.count(link), 2)
@@ -1772,7 +1773,10 @@ class TestDownstreamIssue(unittest.TestCase):
         body = "C" * (d.JIRA_TEXT_BODY_MAX_CHARS + 100)
         out = d._truncate_jira_text(body, None)
         self.assertLessEqual(len(out), d.JIRA_TEXT_BODY_MAX_CHARS)
+        self.assertIn("Truncated", out)
         self.assertIn("....", out)
+        self.assertNotIn("[See More|", out)
+        self.assertTrue(out.startswith("{warning}"))
         self.assertGreaterEqual(out.count("C"), d.JIRA_TEXT_BODY_MIN_CHARS)
 
     def test_truncate_jira_text_huge_url_drops_link(self):
@@ -1784,8 +1788,11 @@ class TestDownstreamIssue(unittest.TestCase):
         body = "D" * (d.JIRA_TEXT_BODY_MAX_CHARS + 200)
         out = d._truncate_jira_text(body, huge_url)
         self.assertLessEqual(len(out), d.JIRA_TEXT_BODY_MAX_CHARS)
-        self.assertNotIn(huge_url, out)
+        self.assertIn("Truncated", out)
         self.assertIn("....", out)
+        self.assertNotIn(huge_url, out)
+        self.assertNotIn("[See More|", out)
+        self.assertTrue(out.startswith("{warning}"))
         self.assertGreaterEqual(out.count("D"), d.JIRA_TEXT_BODY_MIN_CHARS)
 
     @mock.patch("jira.client.JIRA")

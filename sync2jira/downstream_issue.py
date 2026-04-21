@@ -256,42 +256,46 @@ def _comment_format(comment):
     )
 
 
-def _truncate_jira_text(body: str, upstream_issue_url: Optional[str] = None) -> str:
+def _truncate_jira_text(
+    body: str,
+    upstream_issue_url: Optional[str] = None,
+    max_chars: Optional[int] = None,
+) -> str:
     """
-    Ensure ``body`` fits Jira's comment size limit.
+    Ensure ``body`` fits within *max_chars* (default: comment limit).
 
     If truncated, a notice is prepended and a truncation marker appended.  When
     an upstream URL is available it is included — *unless* the link is so
     long that it would eat into the minimum body budget, in which case the link
     is dropped entirely.
     """
-    if len(body) <= JIRA_TEXT_BODY_MAX_CHARS:
+    if max_chars is None:
+        max_chars = JIRA_TEXT_BODY_MAX_CHARS
+
+    if len(body) <= max_chars:
         return body
 
     log.info(
-        "Truncating Jira comment body from %d to max %d characters",
+        "Truncating Jira text body from %d to max %d characters",
         len(body),
-        JIRA_TEXT_BODY_MAX_CHARS,
+        max_chars,
     )
 
     head = "{warning}*(Truncated.)*{warning}\n"
-    tail = "\n\n{warning}*....*{warning}"
+    tail = "\n\n{warning}*....*{warning}\n"
 
     link_block = ""
     if upstream_issue_url:
-        link_block = f"[See More|{upstream_issue_url}]\n\n"
+        link_block = f"[See More|{upstream_issue_url}]\n"
 
-    fixed_overhead = len(head) + len(tail)
+    fixed_overhead = len(head) + len(tail) + 1  # +1 for the \n before body
     link_overhead = 2 * len(link_block)
-    if (
-        fixed_overhead + link_overhead + JIRA_TEXT_BODY_MIN_CHARS
-        > JIRA_TEXT_BODY_MAX_CHARS
-    ):
+    if fixed_overhead + link_overhead + JIRA_TEXT_BODY_MIN_CHARS > max_chars:
         link_block = ""
         link_overhead = 0
 
-    core_len = JIRA_TEXT_BODY_MAX_CHARS - fixed_overhead - link_overhead
-    return head + link_block + body[:core_len] + tail + link_block
+    core_len = max_chars - fixed_overhead - link_overhead
+    return head + link_block + "\n" + body[:core_len] + tail + link_block
 
 
 def _comment_format_legacy(comment):
@@ -516,9 +520,7 @@ def check_comments_for_duplicate(client, result, username):
     return None
 
 
-def _find_comment_in_jira(
-    comment, j_comments, upstream_issue_url: Optional[str] = None
-):
+def _find_comment_in_jira(comment, j_comments, issue_url: Optional[str] = None):
     """
     Helper function to filter out comments that are matching.
 
@@ -533,9 +535,7 @@ def _find_comment_in_jira(
         # touch the comment; return the item as is.
         return comment
 
-    formatted_comment = _truncate_jira_text(
-        _comment_format(comment), upstream_issue_url
-    )
+    formatted_comment = _truncate_jira_text(_comment_format(comment), issue_url)
     legacy_formatted_comment = _comment_format_legacy(comment)
     for item in j_comments:
         if item.raw["body"] == legacy_formatted_comment:
@@ -1364,23 +1364,41 @@ def _update_tags(updates, existing, issue):
 
 
 def _build_description(issue):
-    # Build the description of the JIRA issue
+    # Build the description of the JIRA issue.
+    #
+    # Truncate issue.content *before* wrapping it with {quote} and the
+    # metadata prefix so the closing {quote} and decoration are never lost.
     issue_updates = issue.downstream.get("issue_updates", [])
-    description = ""
-    if "description" in issue_updates:
-        description = f"Upstream description: {{quote}}{issue.content}{{quote}}"
 
-    if issue.status and any("transition" in item for item in issue_updates):
-        # Add the upstream issue status to the top of the description
-        formatted_status = "Upstream issue status: " + issue.status
-        description = formatted_status + "\n" + description
-
+    # Build the prefix lines that will appear above the quoted content.
+    prefix_parts = []
     if issue.reporter:
-        # Add to the description
-        prefix = f"[{issue.id}] Upstream Reporter: {issue.reporter['fullname']}\n"
-        description = prefix + description
+        prefix_parts.append(
+            f"[{issue.id}] Upstream Reporter: {issue.reporter['fullname']}"
+        )
+    if issue.status and any("transition" in item for item in issue_updates):
+        prefix_parts.append("Upstream issue status: " + issue.status)
 
-    return _truncate_jira_text(description, getattr(issue, "url", None))
+    prefix = "\n".join(prefix_parts) + "\n" if prefix_parts else ""
+    suffix = ""
+    if "url" in issue_updates:
+        suffix = f"\nUpstream URL: {issue.url}"
+    if "description" in issue_updates:
+        quote_wrapper = "Upstream description: {quote}{quote}"
+        decoration_len = len(prefix) + len(quote_wrapper)
+        budget = JIRA_TEXT_BODY_MAX_CHARS - decoration_len
+        description = prefix
+        content = issue.content or ""
+        if len(content) > budget:
+            upstream_url = getattr(issue, "url", None)
+            content = _truncate_jira_text(content, upstream_url, max_chars=budget)
+            description += f"Upstream description: {{quote}}{content}{{quote}}"
+        else:
+            description += f"Upstream description: {{quote}}{content}{{quote}}" + suffix
+    else:
+        description = prefix + suffix
+
+    return description
 
 
 def _update_description(existing, issue):
