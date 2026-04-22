@@ -50,13 +50,16 @@ class TestGithubUsernameToEmails:
     @patch("Rover_Lookup.lookup.Connection")
     def test_successful_lookup_single_record(self, mock_connection_class, caplog):
         """Test successful LDAP lookup with single record containing multiple emails."""
+        # Mock the LDAP server connection
         mock_conn = Mock()
         mock_connection_class.return_value = mock_conn
         mock_conn.search.return_value = True
 
+        # Mock the LDAP entry
         mock_entry = Mock()
         mock_entry.entry_dn = "cn=testuser,cn=users,cn=accounts,dc=redhat,dc=com"
 
+        # Mock email attributes
         mock_primary_mail = Mock()
         mock_primary_mail.value = "user@redhat.com"
         mock_entry.rhatPrimaryMail = mock_primary_mail
@@ -66,6 +69,7 @@ class TestGithubUsernameToEmails:
         mock_entry.mail = mock_mail
 
         mock_preferred_alias = Mock()
+        # Duplicate value to test deduplication
         mock_preferred_alias.value = "user@redhat.com"
         mock_entry.rhatPreferredAlias = mock_preferred_alias
 
@@ -74,12 +78,12 @@ class TestGithubUsernameToEmails:
         with caplog.at_level(logging.DEBUG):
             result = self._call("test-user")
 
+        # Verify result
         assert result == [
             "user.alias@redhat.com",
             "user@example.com",
             "user@redhat.com",
         ]
-
         mock_connection_class.assert_called_with(
             self.LDAP_SERVER,
             self.LDAP_BIND_DN,
@@ -88,6 +92,7 @@ class TestGithubUsernameToEmails:
             raise_exceptions=True,
         )
 
+        # Verify LDAP query was called correctly
         mock_conn.search.assert_called_once()
         search_args = mock_conn.search.call_args
         filter_part = "rhatSocialURL=Github->https://github.com/test-user"
@@ -103,10 +108,12 @@ class TestGithubUsernameToEmails:
     @patch("Rover_Lookup.lookup.Connection")
     def test_successful_lookup_multiple_records(self, mock_connection_class):
         """Test successful LDAP lookup with multiple records."""
+        # Mock the LDAP server connection
         mock_conn = Mock()
         mock_connection_class.return_value = mock_conn
         mock_conn.search.return_value = True
 
+        # Create two mock entries
         mock_entry1 = Mock()
         mock_entry1.entry_dn = "cn=user1,cn=users,cn=accounts,dc=redhat,dc=com"
         mock_primary_mail1 = Mock()
@@ -131,6 +138,7 @@ class TestGithubUsernameToEmails:
 
         result = self._call("test-user")
 
+        # Verify result combines emails from both records
         assert result == [
             "team@redhat.com",
             "user1@redhat.com",
@@ -144,7 +152,7 @@ class TestGithubUsernameToEmails:
         mock_conn = Mock()
         mock_connection_class.return_value = mock_conn
         mock_conn.search.return_value = True
-        mock_conn.entries = []
+        mock_conn.entries = []  # No entries found
 
         with caplog.at_level(logging.INFO):
             result = self._call("nonexistent-user")
@@ -160,9 +168,11 @@ class TestGithubUsernameToEmails:
         mock_connection_class.return_value = mock_conn
         mock_conn.search.return_value = True
 
+        # Mock entry with no email attributes
         mock_entry = Mock()
         mock_entry.entry_dn = "cn=testuser,cn=users,cn=accounts,dc=redhat,dc=com"
 
+        # Mock attributes that don't exist or are empty
         mock_entry.rhatPrimaryMail = Mock()
         mock_entry.rhatPrimaryMail.value = None
         mock_entry.mail = Mock()
@@ -181,7 +191,7 @@ class TestGithubUsernameToEmails:
         """Test LDAP search failure."""
         mock_conn = Mock()
         mock_connection_class.return_value = mock_conn
-        mock_conn.search.return_value = False
+        mock_conn.search.return_value = False  # Search failed
 
         with caplog.at_level(logging.INFO):
             result = self._call("test-user")
@@ -276,6 +286,7 @@ class TestGithubUsernameToEmails:
             ldap_password="secret",
         )
 
+        # Verify custom parameters were used
         mock_connection_class.assert_called_with(
             "ldap://custom.server.com",
             "cn=bind,dc=custom,dc=com",
@@ -284,6 +295,7 @@ class TestGithubUsernameToEmails:
             raise_exceptions=True,
         )
 
+        # Verify custom base DN was used in search
         search_args = mock_conn.search.call_args
         assert search_args[1]["search_base"] == "ou=people,dc=custom,dc=com"
 
