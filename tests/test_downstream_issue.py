@@ -618,7 +618,7 @@ class TestDownstreamIssue(unittest.TestCase):
             "login4": [mock_user.emailAddress],
             "login5": [mock_user2.emailAddress],
         }
-        mock_rover_lookup.side_effect = lambda un: rlu.get(
+        mock_rover_lookup.side_effect = lambda un, **kwargs: rlu.get(
             un, AssertionError("Test bug!  Missing assignee login")
         )
 

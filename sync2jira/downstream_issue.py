@@ -711,7 +711,13 @@ def assign_user(
 
     # See if any of the upstream assignees has a downstream email address.
     for assignee in issue.assignee:
-        emails = Rover_Lookup.github_username_to_emails(assignee["login"])
+        emails = Rover_Lookup.github_username_to_emails(
+            assignee["login"],
+            ldap_server=os.getenv("LDAP_SERVER"),
+            ldap_base_dn=os.getenv("LDAP_BASE_DN"),
+            ldap_bind_dn=os.getenv("LDAP_BIND_DN"),
+            ldap_password=os.getenv("LDAP_PASSWORD"),
+        )
         if not emails:
             continue
 
