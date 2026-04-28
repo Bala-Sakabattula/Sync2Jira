@@ -1533,8 +1533,19 @@ def update_jira(client, config, issue):
             and issue.content
             and "github_markdown" in issue.downstream["issue_updates"]
         ):
-            issue.content = pypandoc.convert_text(issue.content, "jira", format="gfm")
-
+            try:
+                issue.content = pypandoc.convert_text(issue.content, "jira", format="gfm")
+            except Exception as e:
+                log.warning("pypandoc conversion failed, retrying with TeX disabled: %s", e)
+                try:
+                    sanitized = issue.content.replace("\\", "\\\\").replace("$", r"\$")
+                    issue.content = pypandoc.convert_text(
+                        sanitized,
+                        "jira",
+                        format="gfm-tex_math_dollars-tex_math_single_backslash",
+                    )
+                except Exception as e2:
+                    log.warning("pypandoc fallback also failed; using raw content: %s", e2)
     # First, check to see if we have a matching issue using the new method.
     # If we do, then bail out.  No sync needed.
     log.info("Looking for matching downstream issue via new method.")
