@@ -1521,6 +1521,29 @@ def sync_with_jira(issue, config):
         retry = True
 
 
+def convert_content(content):
+    """Convert GitHub Flavored Markdown to Jira format via pypandoc.
+
+    Falls back to disabling TeX math extensions if the initial conversion
+    fails (e.g. content misinterpreted as LaTeX).  Returns the original
+    content unchanged if both attempts fail.
+    """
+    try:
+        content = pypandoc.convert_text(content, "jira", format="gfm")
+    except Exception as e:
+        log.warning("pypandoc conversion failed, retrying with TeX disabled: %s", e)
+        try:
+            sanitized = content.replace("\\", "\\\\").replace("$", "\\$")
+            content = pypandoc.convert_text(
+                sanitized,
+                "jira",
+                format="gfm-tex_math_dollars-tex_math_single_backslash",
+            )
+        except Exception as e2:
+            log.warning("pypandoc fallback also failed; using raw content: %s", e2)
+    return content
+
+
 def update_jira(client, config, issue):
     # Check the status of the JIRA client
     if not config["sync2jira"]["develop"] and not check_jira_status(client):
@@ -1533,25 +1556,7 @@ def update_jira(client, config, issue):
             and issue.content
             and "github_markdown" in issue.downstream["issue_updates"]
         ):
-            try:
-                issue.content = pypandoc.convert_text(
-                    issue.content, "jira", format="gfm"
-                )
-            except Exception as e:
-                log.warning(
-                    "pypandoc conversion failed, retrying with TeX disabled: %s", e
-                )
-                try:
-                    sanitized = issue.content.replace("\\", "\\\\").replace("$", r"\$")
-                    issue.content = pypandoc.convert_text(
-                        sanitized,
-                        "jira",
-                        format="gfm-tex_math_dollars-tex_math_single_backslash",
-                    )
-                except Exception as e2:
-                    log.warning(
-                        "pypandoc fallback also failed; using raw content: %s", e2
-                    )
+            issue.content = convert_content(issue.content)
     # First, check to see if we have a matching issue using the new method.
     # If we do, then bail out.  No sync needed.
     log.info("Looking for matching downstream issue via new method.")
