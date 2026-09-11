@@ -44,8 +44,7 @@ def _cleanup_expired_jobs():
             jid
             for jid, job in _jobs.items()
             if job["status"] in ("completed", "failed")
-            and job.get("finished_at") is not None
-            and job["finished_at"] < cutoff
+            and job.get("finished_at", 1e99) < cutoff
         ]
         for jid in expired:
             _jobs.pop(jid)
@@ -87,15 +86,21 @@ def handle_event():
     repos_to_sync = [repo for repo, switch in response.items() if switch == "on"]
 
     if not repos_to_sync:
-        return render_template("sync-page-failure.jinja", url=f"https://{REDIRECT_URL}")
+        return (
+            render_template("sync-page-failure.jinja", url=f"https://{REDIRECT_URL}"),
+            400,
+        )
 
     with _jobs_repo_lock:
         already_syncing = set(repos_to_sync) & _jobs_repo
         if already_syncing:
-            return render_template(
-                "sync-page-failure.jinja",
-                url=f"https://{REDIRECT_URL}",
-                error=f"Already syncing: {', '.join(already_syncing)}",
+            return (
+                render_template(
+                    "sync-page-failure.jinja",
+                    url=f"https://{REDIRECT_URL}",
+                    error=f"Already syncing: {', '.join(already_syncing)}",
+                ),
+                409,
             )
         _jobs_repo.update(repos_to_sync)
 

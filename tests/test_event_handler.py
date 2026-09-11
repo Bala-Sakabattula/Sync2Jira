@@ -1,9 +1,6 @@
-# Build-In Modules
-import importlib.util
 import os
 import pathlib
 import sys
-import threading
 import time
 import unittest
 from unittest import mock
@@ -12,18 +9,12 @@ from unittest import mock
 os.environ.setdefault("BASE_URL", "localhost")
 os.environ.setdefault("REDIRECT_URL", "example.com")
 
-_MODULE_PATH = str(
-    pathlib.Path(__file__).parent.parent / "sync-page" / "event-handler.py"
-)
+sys.path.insert(0, str(pathlib.Path(__file__).parent.parent / "sync-page"))
 
-# Load the event-handler module with load_config mocked so no real config file is needed.
 with mock.patch(
     "sync2jira.main.load_config", return_value={"sync2jira": {"map": {"github": {}}}}
 ):
-    spec = importlib.util.spec_from_file_location("event_handler", _MODULE_PATH)
-    eh = importlib.util.module_from_spec(spec)
-    sys.modules["event_handler"] = eh
-    spec.loader.exec_module(eh)  # type: ignore[union-attr]
+    import event_handler as eh
 
 PATH = "event_handler."
 
@@ -42,66 +33,76 @@ class TestHandleEvent(unittest.TestCase):
     """Tests for the /handle-event POST endpoint."""
 
     def setUp(self):
-        self.mock_config = {
-            "sync2jira": {"testing": False, "map": {"github": {"org/repo": {}}}}
-        }
         eh._jobs.clear()
         eh._jobs_repo.clear()
         self.client = eh.app.test_client()
 
-    def test_no_repos_selected_returns_failure_page(self):
+    @mock.patch(PATH + "_cleanup_expired_jobs")
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_no_repos_selected_returns_failure_page(self, mock_render, _mock_cleanup):
         resp = self.client.post("/handle-event", data={})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"Failed", resp.data)
+        self.assertEqual(resp.status_code, 400)
+        mock_render.assert_called_once_with("sync-page-failure.jinja", url=mock.ANY)
 
-    def test_all_repos_off_returns_failure_page(self):
+    @mock.patch(PATH + "_cleanup_expired_jobs")
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_all_repos_off_returns_failure_page(self, mock_render, _mock_cleanup):
         resp = self.client.post("/handle-event", data={"org/repo": "off"})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"Failed", resp.data)
+        self.assertEqual(resp.status_code, 400)
+        mock_render.assert_called_once_with("sync-page-failure.jinja", url=mock.ANY)
 
-    def test_already_syncing_same_repo_returns_failure_with_error(self):
+    @mock.patch(PATH + "_cleanup_expired_jobs")
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_already_syncing_same_repo_returns_failure_with_error(
+        self, mock_render, _mock_cleanup
+    ):
+        # repo-b overlaps; repo-a is new; repo-c is an unrelated concurrent sync
         with eh._jobs_repo_lock:
-            eh._jobs_repo.add("org/repo")
+            eh._jobs_repo.update(["org/repo-b", "org/repo-c"])
+
+        resp = self.client.post(
+            "/handle-event", data={"org/repo-a": "on", "org/repo-b": "on"}
+        )
+
+        self.assertEqual(resp.status_code, 409)
+        _, kwargs = mock_render.call_args
+        self.assertIn("org/repo-b", kwargs["error"])  # the conflicting repo is named
+        self.assertNotIn(
+            "org/repo-a", kwargs["error"]
+        )  # the non-conflicting repo is not
+
+    @mock.patch(PATH + "_cleanup_expired_jobs")
+    @mock.patch("threading.Thread")
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_valid_repos_creates_job_and_starts_thread(
+        self, mock_render, mock_thread, _mock_cleanup
+    ):
         resp = self.client.post("/handle-event", data={"org/repo": "on"})
+
         self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"Already syncing", resp.data)
+        mock_render.assert_called_once_with(
+            "sync-page-in-progress.jinja",
+            job_id=mock.ANY,
+            synced_repos=["org/repo"],
+            url=mock.ANY,
+        )
 
-    @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_valid_repos_returns_in_progress_page(self, _mock_pr, _mock_issues):
-        resp = self.client.post("/handle-event", data={"org/repo": "on"})
-        self.assertEqual(resp.status_code, 200)
-        self.assertIn(b"Sync in Progress", resp.data)
-
-    @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_valid_repos_creates_in_progress_job(self, _mock_pr, _mock_issues):
-        # Block the sync thread until we have checked the in_progress state
-        sync_started = threading.Event()
-        _mock_issues.side_effect = lambda *a, **kw: sync_started.wait()
-
-        self.client.post("/handle-event", data={"org/repo": "on"})
-
+        # Job created in in_progress state
         with eh._jobs_lock:
             self.assertEqual(len(eh._jobs), 1)
             job = next(iter(eh._jobs.values()))
         self.assertEqual(job["status"], "in_progress")
         self.assertEqual(job["repos"], ["org/repo"])
 
-        sync_started.set()  # let the thread finish cleanly
-
-    @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_valid_repos_added_to_jobs_repo_set(self, _mock_pr, _mock_issues):
-        sync_started = threading.Event()
-        _mock_issues.side_effect = lambda *a, **kw: sync_started.wait()
-
-        self.client.post("/handle-event", data={"org/repo": "on"})
-
+        # Repo locked for the duration of the sync
         with eh._jobs_repo_lock:
             self.assertIn("org/repo", eh._jobs_repo)
 
-        sync_started.set()
+        # Background thread created and started with correct arguments
+        mock_thread.assert_called_once_with(
+            target=eh._run_sync, args=(mock.ANY, ["org/repo"]), daemon=True
+        )
+        mock_thread.return_value.start.assert_called_once()
 
 
 class TestJobStatus(unittest.TestCase):
@@ -163,81 +164,60 @@ class TestRunSync(unittest.TestCase):
 
     @mock.patch(PATH + "initialize_issues")
     @mock.patch(PATH + "initialize_pr")
-    def test_success_sets_completed_status(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        eh._run_sync("j1", ["org/repo"])
+    def test_success(self, _mock_pr, _mock_issues):
+        repos = ["org/repo-a", "org/repo-b"]
+        eh._jobs["j1"] = _make_job("in_progress", repos=repos)
+        with eh._jobs_repo_lock:
+            # Simulate a concurrent sync holding an unrelated repo
+            eh._jobs_repo.update(repos + ["org/other-sync"])
+        before = time.monotonic()
+
+        eh._run_sync("j1", repos)
+
         self.assertEqual(eh._jobs["j1"]["status"], "completed")
         self.assertIsNone(eh._jobs["j1"]["error"])
-
-    @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_success_records_finished_at(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        before = time.monotonic()
-        eh._run_sync("j1", ["org/repo"])
-        self.assertIsNotNone(eh._jobs["j1"]["finished_at"])
+        self.assertIsInstance(eh._jobs["j1"]["finished_at"], float)
         self.assertGreaterEqual(eh._jobs["j1"]["finished_at"], before)
-
-    @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_success_releases_repos(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        eh._run_sync("j1", ["org/repo"])
         with eh._jobs_repo_lock:
-            self.assertNotIn("org/repo", eh._jobs_repo)
+            self.assertNotIn("org/repo-a", eh._jobs_repo)  # job's repos released
+            self.assertNotIn("org/repo-b", eh._jobs_repo)
+            self.assertIn("org/other-sync", eh._jobs_repo)  # unrelated sync untouched
 
-    @mock.patch(PATH + "initialize_issues", side_effect=RuntimeError("timeout"))
+    @mock.patch(
+        PATH + "initialize_issues", side_effect=RuntimeError("connection refused")
+    )
     @mock.patch(PATH + "initialize_pr")
-    def test_failure_sets_failed_status_with_error(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        eh._run_sync("j1", ["org/repo"])
+    def test_failure_via_initialize_issues(self, _mock_pr, _mock_issues):
+        repos = ["org/repo"]
+        eh._jobs["j1"] = _make_job("in_progress", repos=repos)
+        with eh._jobs_repo_lock:
+            eh._jobs_repo.update(repos + ["org/other-sync"])
+
+        eh._run_sync("j1", repos)
+
         self.assertEqual(eh._jobs["j1"]["status"], "failed")
-        self.assertEqual(eh._jobs["j1"]["error"], "timeout")
-
-    @mock.patch(PATH + "initialize_issues", side_effect=RuntimeError("boom"))
-    @mock.patch(PATH + "initialize_pr")
-    def test_failure_records_finished_at(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        eh._run_sync("j1", ["org/repo"])
+        self.assertEqual(eh._jobs["j1"]["error"], "connection refused")
         self.assertIsNotNone(eh._jobs["j1"]["finished_at"])
-
-    @mock.patch(PATH + "initialize_issues", side_effect=RuntimeError("err"))
-    @mock.patch(PATH + "initialize_pr")
-    def test_failure_still_releases_repos(self, _mock_pr, _mock_issues):
-        eh._jobs["j1"] = _make_job("in_progress")
-        eh._jobs_repo.add("org/repo")
-        eh._run_sync("j1", ["org/repo"])
         with eh._jobs_repo_lock:
             self.assertNotIn("org/repo", eh._jobs_repo)
+            self.assertIn("org/other-sync", eh._jobs_repo)
 
     @mock.patch(PATH + "initialize_issues")
-    @mock.patch(PATH + "initialize_pr")
-    def test_multiple_repos_all_released_on_success(self, _mock_pr, _mock_issues):
-        repos = ["org/repo-a", "org/repo-b"]
+    @mock.patch(PATH + "initialize_pr", side_effect=RuntimeError("pr fetch failed"))
+    def test_failure_via_initialize_pr(self, _mock_pr, _mock_issues):
+        repos = ["org/repo"]
         eh._jobs["j1"] = _make_job("in_progress", repos=repos)
         with eh._jobs_repo_lock:
-            eh._jobs_repo.update(repos)
-        eh._run_sync("j1", repos)
-        with eh._jobs_repo_lock:
-            for r in repos:
-                self.assertNotIn(r, eh._jobs_repo)
+            eh._jobs_repo.update(repos + ["org/other-sync"])
 
-    @mock.patch(PATH + "initialize_issues", side_effect=RuntimeError("err"))
-    @mock.patch(PATH + "initialize_pr")
-    def test_multiple_repos_all_released_on_failure(self, _mock_pr, _mock_issues):
-        repos = ["org/repo-a", "org/repo-b"]
-        eh._jobs["j1"] = _make_job("in_progress", repos=repos)
-        with eh._jobs_repo_lock:
-            eh._jobs_repo.update(repos)
         eh._run_sync("j1", repos)
+
+        self.assertEqual(eh._jobs["j1"]["status"], "failed")
+        self.assertEqual(eh._jobs["j1"]["error"], "pr fetch failed")
+        self.assertIsNotNone(eh._jobs["j1"]["finished_at"])
         with eh._jobs_repo_lock:
-            for r in repos:
-                self.assertNotIn(r, eh._jobs_repo)
+            self.assertNotIn("org/repo", eh._jobs_repo)
+            self.assertIn("org/other-sync", eh._jobs_repo)
 
 
 class TestCleanupExpiredJobs(unittest.TestCase):
