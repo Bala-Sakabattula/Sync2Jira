@@ -267,3 +267,36 @@ class TestCleanupExpiredJobs(unittest.TestCase):
     def test_job_ttl_constant_is_positive(self):
         self.assertIsInstance(eh.JOB_TTL_SECONDS, int)
         self.assertGreater(eh.JOB_TTL_SECONDS, 0)
+
+
+class TestSyncPage(unittest.TestCase):
+    """Tests for the sync page endpoints."""
+
+    def setUp(self):
+        self.client = eh.app.test_client()
+
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_github_sync_page(self, mock_render):
+        # no config
+        resp = self.client.get("/github")
+        self.assertEqual(resp.status_code, 200)
+        mock_render.assert_called_once_with(
+            "sync-page-github.jinja", github={}, url=mock.ANY
+        )
+
+    @mock.patch(PATH + "render_template", return_value="")
+    def test_github_sync_page_with_config(self, mock_render):
+        # with config
+        with mock.patch(
+            PATH + "config", {"sync2jira": {"map": {"github": {"org/repo": "on"}}}}
+        ):
+            resp = self.client.get("/github")
+            self.assertEqual(resp.status_code, 200)
+            mock_render.assert_called_once_with(
+                "sync-page-github.jinja", github={"org/repo": "on"}, url=mock.ANY
+            )
+
+    def test_sync_page_redirects_to_github(self):
+        resp = self.client.get("/")
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.location, "/github")
